@@ -38,9 +38,9 @@ Trained ISAFNs can be loaded as follows:
 import pickle
 with open("/model/fusion_models_final.pkl", "rb") as f:
     fusion_models = pickle.load(f)
-merged_model = fusion_models['gene+mut']['merged']
-male_model = fusion_models['gene+mut']['male']
-female_model = fusion_models['gene+mut']['female']
+isafn_a = fusion_models['gene+mut']['merged']
+isafn_m = fusion_models['gene+mut']['male']
+isafn_f = fusion_models['gene+mut']['female']
 ```
 
-After loading the models, users can apply them to new samples for ICI response prediction.
+There are three modalities users can choose from, 'gene+mut' for fusion model, 'gene' for gene model, and 'mut' for mutation model. After loading the models, users can apply them to new samples for ICI response prediction.
