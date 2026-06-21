@@ -1,23 +1,3 @@
-#!/bin/bash
-#SBATCH -c 4  # Number of Cores per Task
-##SBATCH --nodes=1
-#SBATCH --gpus=2080ti:1
-#SBATCH --mem=8192  # Requested Memory
-#SBATCH -p gpu          
-#SBATCH --cpus-per-task=4
-#SBATCH --mail-type=FAIL,END
-#SBATCH -t 24:00:00  # Job time limit
-#SBATCH -o slurm-%j.out  # %j = job ID
-
-module load python/3.11.7
-module load cuda/11.8
-
-python -m venv ~/venvs/ici311
-
-source ~/venvs/ici311/bin/activate
-# python -m pip install "setuptools<70"
-# python -m pip show setuptools
-# python -m pip install pandas numpy scipy scikit-learn torch torch_geometric positional_encodings timm imblearn lifelines xgboost lightgbm catboost
 
 
 TRT="PD1"

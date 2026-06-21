@@ -9,15 +9,15 @@ from sklearn.utils import resample
 from scipy.special import expit
 from sklearn.metrics import roc_auc_score
 import copy
-# import xgboost as xgb
+import xgboost as xgb
 from sklearn.pipeline import Pipeline
 from imblearn.ensemble import BalancedRandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.metrics.pairwise import laplacian_kernel
 from sklearn.svm import SVC
-# from catboost import CatBoostClassifier
-# from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
+from lightgbm import LGBMClassifier
 from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.model_selection import RandomizedSearchCV
 
@@ -604,128 +604,128 @@ def genetic_optimize_weights(
     return best_w, best_auc
 
 
-# class MultiModelClassifier(BaseEstimator, ClassifierMixin):
+class MultiModelClassifier(BaseEstimator, ClassifierMixin):
 
-#     def __init__(self):
+    def __init__(self):
 
-#         self.xgb_model = xgb.XGBClassifier(
-#             n_estimators=200,
-#             max_depth=3,
-#             learning_rate=0.05,
-#             eval_metric='auc',
-#             random_state=123
-#         )
+        self.xgb_model = xgb.XGBClassifier(
+            n_estimators=200,
+            max_depth=3,
+            learning_rate=0.05,
+            eval_metric='auc',
+            random_state=123
+        )
 
-#         self.brf_model = BalancedRandomForestClassifier(
-#             n_estimators=500,
-#             max_depth=None,
-#             max_features='sqrt',
-#             min_samples_leaf=5,
-#             random_state=123
-#         )
-#         self.svm_model = SVC(
-#             C=1.0,
-#             kernel='rbf',
-#             probability=True,
-#             random_state=123,
-#             class_weight="balanced",
-#             gamma = 0.1
-#         )
+        self.brf_model = BalancedRandomForestClassifier(
+            n_estimators=500,
+            max_depth=None,
+            max_features='sqrt',
+            min_samples_leaf=5,
+            random_state=123
+        )
+        self.svm_model = SVC(
+            C=1.0,
+            kernel='rbf',
+            probability=True,
+            random_state=123,
+            class_weight="balanced",
+            gamma = 0.1
+        )
 
-#         self.svm_sigmoid = SVC(
-#                 kernel='sigmoid',
-#                 C=1,
-#                 gamma='scale',
-#                 probability=True,
-#                 random_state=123
-#             )
+        self.svm_sigmoid = SVC(
+                kernel='sigmoid',
+                C=1,
+                gamma='scale',
+                probability=True,
+                random_state=123
+            )
 
-#         self.lr_model = LogisticRegression(
-#                 penalty='elasticnet',
-#                 solver='saga',
-#                 l1_ratio=0.2,
-#                 C=0.1,
-#                 max_iter=5000
-#             )
+        self.lr_model = LogisticRegression(
+                penalty='elasticnet',
+                solver='saga',
+                l1_ratio=0.2,
+                C=0.1,
+                max_iter=5000
+            )
 
-#         self.svm_linear = SVC(
-#                 kernel='linear',
-#                 C=1,
-#                 probability=True,
-#                 random_state=123
-#             )
+        self.svm_linear = SVC(
+                kernel='linear',
+                C=1,
+                probability=True,
+                random_state=123
+            )
 
-#         self.cat_model = CatBoostClassifier(
-#             iterations=200,
-#             depth=4,
-#             learning_rate=0.05,
-#             loss_function='Logloss',
-#             verbose=False
-#         )
+        self.cat_model = CatBoostClassifier(
+            iterations=200,
+            depth=4,
+            learning_rate=0.05,
+            loss_function='Logloss',
+            verbose=False
+        )
 
-#         self.ert_model = ExtraTreesClassifier(
-#             n_estimators=500,
-#             max_depth=None,
-#             min_samples_split=5,
-#             min_samples_leaf=2,
-#             max_features='sqrt',
-#             class_weight='balanced',
-#             bootstrap=True,
-#             random_state=123,
-#             n_jobs=-1
-#         )
+        self.ert_model = ExtraTreesClassifier(
+            n_estimators=500,
+            max_depth=None,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            max_features='sqrt',
+            class_weight='balanced',
+            bootstrap=True,
+            random_state=123,
+            n_jobs=-1
+        )
 
-#         self.lgbm_model = LGBMClassifier(
-#             objective='binary',
-#             n_estimators=300,
-#             learning_rate=0.03,
-#             num_leaves=15,
-#             max_depth=4,
-#             min_child_samples=20,
-#             subsample=0.8,
-#             colsample_bytree=0.8,
-#             reg_alpha=1.0,
-#             reg_lambda=1.0,
-#             class_weight='balanced',
-#             random_state=42,
-#             verbosity=-1
-#         )
+        self.lgbm_model = LGBMClassifier(
+            objective='binary',
+            n_estimators=300,
+            learning_rate=0.03,
+            num_leaves=15,
+            max_depth=4,
+            min_child_samples=20,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=1.0,
+            reg_lambda=1.0,
+            class_weight='balanced',
+            random_state=42,
+            verbosity=-1
+        )
 
-#     def fit(self, X, y):
+    def fit(self, X, y):
 
-#         self.xgb_model.fit(X, y)
-#         self.brf_model.fit(X, y)
-#         self.svm_model.fit(X,y)
-#         self.svm_sigmoid.fit(X,y)
-#         self.svm_linear.fit(X, y)
-#         self.lr_model.fit(X, y)
-#         return self
+        self.xgb_model.fit(X, y)
+        self.brf_model.fit(X, y)
+        self.svm_model.fit(X,y)
+        self.svm_sigmoid.fit(X,y)
+        self.svm_linear.fit(X, y)
+        self.lr_model.fit(X, y)
+        return self
 
-#     def get_models(self):
+    def get_models(self):
 
-#         return {
-#             'xgb': self.xgb_model,
-#             'brf': self.brf_model,
-#             'svm': self.svm_model,
-#             'svm_linear': self.svm_linear,
-#             'svm_sigmoid': self.svm_sigmoid,
-#             'lr': self.lr_model,
-#         }
+        return {
+            'xgb': self.xgb_model,
+            'brf': self.brf_model,
+            'svm': self.svm_model,
+            'svm_linear': self.svm_linear,
+            'svm_sigmoid': self.svm_sigmoid,
+            'lr': self.lr_model,
+        }
 
-#     def predict_proba(self, X):
+    def predict_proba(self, X):
 
-#         xgb_prob = self.xgb_model.predict_proba(X)[:, 1].reshape(-1)
-#         brf_prob = self.brf_model.predict_proba(X)[:, 1].reshape(-1)
-#         svm_prob = self.svm_model.predict_proba(X)[:, 1].reshape(-1)
-#         svm_sigmoid_prob = self.svm_sigmoid.predict_proba(X)[:, 1].reshape(-1)
-#         svm_linear_prob = self.svm_linear.predict_proba(X)[:, 1].reshape(-1)
-#         lr_prob = self.lr_model.predict_proba(X)[:, 1].reshape(-1)
+        xgb_prob = self.xgb_model.predict_proba(X)[:, 1].reshape(-1)
+        brf_prob = self.brf_model.predict_proba(X)[:, 1].reshape(-1)
+        svm_prob = self.svm_model.predict_proba(X)[:, 1].reshape(-1)
+        svm_sigmoid_prob = self.svm_sigmoid.predict_proba(X)[:, 1].reshape(-1)
+        svm_linear_prob = self.svm_linear.predict_proba(X)[:, 1].reshape(-1)
+        lr_prob = self.lr_model.predict_proba(X)[:, 1].reshape(-1)
 
-#         return {
-#             "xgb_prob": xgb_prob,
-#             "brf_prob": brf_prob,
-#             "svm_prob": svm_prob,
-#             "svm_sigmoid_prob": svm_sigmoid_prob,
-#             "svm_linear_prob": svm_linear_prob,
-#             "lr_prob": lr_prob,
-#         }
+        return {
+            "xgb_prob": xgb_prob,
+            "brf_prob": brf_prob,
+            "svm_prob": svm_prob,
+            "svm_sigmoid_prob": svm_sigmoid_prob,
+            "svm_linear_prob": svm_linear_prob,
+            "lr_prob": lr_prob,
+        }
