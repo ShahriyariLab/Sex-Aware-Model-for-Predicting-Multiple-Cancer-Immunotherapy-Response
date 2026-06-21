@@ -22,7 +22,7 @@ from inmoose.pycombat import pycombat_norm, pycombat_seq
 warnings.filterwarnings("ignore")
 
 # ## map symbol to entrez id
-symbol2id = pd.read_csv("/home/qiluzhou_umass_edu/mutation_attention/data/symbol2entrez.csv")
+symbol2id = pd.read_csv("./data/symbol2entrez.csv")
 symbol2id1 = symbol2id[~symbol2id['entrez_id'].isna()]
 symbol2id1['entrez_id'] = symbol2id1['entrez_id'].apply(lambda x: int(x))
 
@@ -162,6 +162,9 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
             if gene is not None:
                 gene_all = gene.reset_index(drop=True)
             strat = full_data["source"].astype(str) + "_" + full_data[label_id].astype(str)
+            counts = strat.value_counts()
+            if counts.min() < 2:
+                strat = full_data[label_id]
 
             if k_fold == 1:
                 idx = np.arange(len(X_all))
@@ -289,6 +292,10 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
                 gene_all = gene.reset_index(drop=True)
 
             strat = (y_all.astype(str) + "_" + full_data['source'].astype(str)) if y_all.nunique() > 1 else None
+            counts = strat.value_counts()
+            if counts.min() < 2:
+                strat = y_all
+
             if k_fold == 1:
                 # Single "fold": train = all, val = all
                 idx = np.arange(X_all.shape[0])

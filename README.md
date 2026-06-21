@@ -6,29 +6,29 @@ This repository contains the source code required to train, validate, and apply 
 
 We provide three versions of ISAFN:
 
-\dot ISAFN: the original model
-\dot ISAFN-EMS: ISAFN ensembled with multiple machine learning models
-\dot ISAFN-TCGA: ISAFN pretrained on TCGA data
+- ISAFN: the original model
+- ISAFN-EMS: ISAFN ensembled with multiple machine learning models
+- ISAFN-TCGA: ISAFN pretrained on TCGA data
 
 #### ISAFN
 
 To train the original ISAFN model, run:
 
 ```bash
-sbatch codes/model_fusion.sh
+bash codes/model_fusion.sh
 ```
 
 #### Ensemble ISAFN and Pretrained ISAFN
 
 To train the ensemble or pretrained versions, run:
 ```bash
-sbatch codes/model_pretrain_ems.sh
+bash codes/model_pretrain_ems.sh
 ```
 
 The model version is controlled by the pretrain parameter in the script:
 
-\dot pretrain="None": trains the ensemble ISAFN
-\dot pretrain="TCGA": trains the TCGA-pretrained ISAFN
+- pretrain="None": trains the ensemble ISAFN
+- pretrain="TCGA": trains the TCGA-pretrained ISAFN
 
 ### Model Prediction
 

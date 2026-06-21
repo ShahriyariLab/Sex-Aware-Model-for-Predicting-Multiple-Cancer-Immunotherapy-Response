@@ -17,13 +17,7 @@ os.environ["SCIPY_ARRAY_API"] = "1"
 
 from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, f1_score, confusion_matrix, precision_recall_curve, mean_absolute_error, mean_squared_error
 from sklearn.model_selection import train_test_split, KFold, cross_val_score, StratifiedKFold, cross_validate, RepeatedStratifiedKFold
-from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import LabelEncoder
-from lifelines import CoxPHFitter
-from lifelines.utils import concordance_index
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-from imblearn.ensemble import BalancedRandomForestClassifier
+
 import xgboost as xgb
 from scipy.special import expit
 from sklearn.linear_model import SGDClassifier
@@ -49,7 +43,7 @@ import argparse
 from processing import get_all_score, set_seed, zscore_norm, get_2dpos, prepare_mut_data, encode_domain, remove_nonmutate, prepare_test_data, _to_tensor_df, best_threshold_macro_f1, quantile_transformation, cohort_align_zscore
 from selection import feature_selection
 
-from model_utils import SelfAttention, gene_model, mut_model, tme_extractor, Classifier_fusion, DomainDiscriminator, compute_group_attributions_fusion, mmd_loss, BalancedBatchSampler, EarlyStopping, ResidualModel, LoRALinear, apply_lora_to_linears, genetic_optimize_weights, MultiModelClassifier
+from model_utils import SelfAttention, gene_model, mut_model, Classifier_fusion, DomainDiscriminator, compute_group_attributions_fusion, BalancedBatchSampler, EarlyStopping, LoRALinear, apply_lora_to_linears, genetic_optimize_weights, MultiModelClassifier
 warnings.filterwarnings("ignore")
 
 device = (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))

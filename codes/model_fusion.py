@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
 from torch_geometric.data import Data
-from positional_encodings.torch_encodings import PositionalEncoding1D
+#from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch.utils.data import WeightedRandomSampler
 import torch.optim as optim
 import pandas as pd
@@ -15,14 +15,9 @@ import torch.utils.data as du
 import random
 os.environ["SCIPY_ARRAY_API"] = "1"
 
-from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, f1_score, confusion_matrix, precision_recall_curve, mean_absolute_error, mean_squared_error
-from sklearn.model_selection import train_test_split, KFold, cross_val_score, StratifiedKFold, cross_validate, RepeatedStratifiedKFold
-from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import LabelEncoder
-from lifelines import CoxPHFitter
-from lifelines.utils import concordance_index
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, f1_score, confusion_matrix
+#from sklearn.model_selection import train_test_split, KFold, cross_val_score, StratifiedKFold, cross_validate, RepeatedStratifiedKFold
+
 import pickle
 
 import numpy as np
@@ -38,7 +33,7 @@ from layers import convert_to_sn, remove_all_normalization_layers
 import argparse
 from processing import get_all_score, set_seed, zscore_norm, get_2dpos, prepare_mut_data, encode_domain, remove_nonmutate, prepare_test_data, _to_tensor_df, best_threshold_macro_f1, quantile_transformation, cohort_align_zscore, quantile_norm, combat_correction, cohort_align_minmax
 from selection import feature_selection
-from model_utils import SelfAttention, gene_model, mut_model, tme_extractor, Classifier_fusion, DomainDiscriminator, compute_group_attributions_fusion, mmd_loss, BalancedBatchSampler, EarlyStopping, ResidualModel
+from model_utils import SelfAttention, gene_model, mut_model, Classifier_fusion, compute_group_attributions_fusion, BalancedBatchSampler, EarlyStopping
 warnings.filterwarnings("ignore")
 
 device = (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
@@ -188,10 +183,9 @@ def predict_fusionmodel(predict_data, feature_extractor_gene, feature_extractor_
         outputs_mut, outputs_sex, outputs_cancer = feature_extractor_mut(target_mutation)
         outputs_gene = feature_extractor_gene(target_gene1)
         features = torch.cat([outputs_gene, outputs_mut], axis = 1)
-        outputs_tme = None
         features = torch.nan_to_num(features, nan=1e-06)
 
-        outputs = classifier(outputs_gene, outputs_mut, outputs_tme, outputs_sex, outputs_cancer).view(-1, 1)
+        outputs = classifier(outputs_gene, outputs_mut, outputs_sex).view(-1, 1)
         final_logits = outputs
         probs = final_logits/temperature
         probs = torch.sigmoid(probs).squeeze()
@@ -436,9 +430,9 @@ def main(args):
     male_tme = ['PRF1','B2M','HLA-E','GZMK','HLA-DRA','CD86','STAT1','XIAP','CXCL9','CCL21']
     merged_tme = ['IL2RG','CD200','CCL20','NKG7','CXCL10','CD276','CCL21','CXCR4','HLA-DRA','CXCL2','CIITA','TAGAP','CMKLR1','GZMA','LAMP3','IDO1','CD4','CD28','HLA-DRB1','CCL19','STAT1']
 
-    merged_feature = selected_features_deg['expr'] + literature_genes + merged_tme
-    male_feature = selected_features_deg_male['expr'] + literature_genes + male_tme
-    female_feature = selected_features_deg_female['expr'] + literature_genes + female_tme
+    merged_feature = list(set(selected_features_deg['expr'] + literature_genes + merged_tme))
+    male_feature = list(set(selected_features_deg_male['expr'] + literature_genes + male_tme))
+    female_feature = list(set(selected_features_deg_female['expr'] + literature_genes + female_tme))
 
     selected_gene_features = list(dict.fromkeys(x for x in merged_feature if x in gene_common_train.columns))
     selected_mutation_features = [x for x in merged_feature if x in mutation_common_train.columns]
@@ -499,9 +493,9 @@ def main(args):
 
         merged_output, merged_score, merged_pred = predict_fusionmodel(test_fusion, merged_model[0], merged_model[1], merged_model[2], merged_model[3],
                                                                        args.temperature, predict_cohort = clin_common_test['source'])
-        male_output, male_score, male_pred = predict_fusionmodel(test_fusion_male, male_model[0], male_model[1], male_model[2], male_model[3], loc_encoding_gene_male1, loc_encoding_mut_male1, 
+        male_output, male_score, male_pred = predict_fusionmodel(test_fusion_male, male_model[0], male_model[1], male_model[2], male_model[3],
                                                                  args.temperature, predict_cohort = clin_common_test_male['source'])
-        female_output, female_score, female_pred = predict_fusionmodel(test_fusion_female, female_model[0], female_model[1], female_model[2], female_model[3], loc_encoding_gene_female1, loc_encoding_mut_female1,
+        female_output, female_score, female_pred = predict_fusionmodel(test_fusion_female, female_model[0], female_model[1], female_model[2], female_model[3],
                                                                        args.temperature, predict_cohort = clin_common_test_female['source'])
 
         output = merged_output + male_output + female_output
