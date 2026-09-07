@@ -22,21 +22,9 @@ from inmoose.pycombat import pycombat_norm, pycombat_seq
 warnings.filterwarnings("ignore")
 
 # ## map symbol to entrez id
-symbol2id = pd.read_csv("./data/symbol2entrez.csv")
+symbol2id = pd.read_csv("data/symbol2entrez.csv")
 symbol2id1 = symbol2id[~symbol2id['entrez_id'].isna()]
 symbol2id1['entrez_id'] = symbol2id1['entrez_id'].apply(lambda x: int(x))
-
-def map_index_id(df, merge_df, id2symbol = False, transcript = False):
-    if not transcript:
-        if not id2symbol:
-            df1 = df.merge(merge_df, left_index = True, right_on = 'symbol', how = "inner")
-            df1.index = df1['entrez_id']
-            df1 = df1.drop(columns = ['symbol', 'entrez_id'])
-        else:
-            df1 = df.merge(merge_df, left_index = True, right_on = 'entrez_id', how = "inner")
-            df1.index = df1['symbol']
-            df1 = df1.drop(columns = ['symbol', 'entrez_id', 'transcripts'])
-    return df1
 
 
 # length of each chromosome
@@ -77,7 +65,7 @@ def safe_transform(le, values):
     return [mapping.get(v, unknown) for v in values]
 
 def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, k_fold = 5, gene = None, tme_feature = None, 
-                        train_domains=None, test_domains=None, lodo = False): # labels is a dataframe with id and response info
+                        train_domains=None, test_domains=None, task = 'classification', lodo = False): # labels is a dataframe with id and response info
     full_data = clin.merge(pos, left_index = True, right_index = True, how = 'inner').copy()
     source_labels = clin.loc[full_data.index]['source'].values
     source_labels1 = clin.loc[full_data.index]['source'].reset_index(drop=True)
@@ -90,6 +78,8 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
         # ---- gene / TME ----
         if gene is not None:
             gene = gene.loc[full_data.index]
+            # if tme_feature is not None:
+            #     gene = pd.concat([gene, full_data[tme_feature]], axis=1)
             gene.reset_index(drop=True, inplace=True)
 
         dom = full_data['source']
@@ -120,6 +110,10 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
         else:
             X_tr_rs = X_train_df.reset_index(drop=True)
             y_tr_rs = y_train.reset_index(drop=True)
+        # X_tr_rs, y_tr_rs = ros.fit_resample(
+        #     X_train_df.reset_index(drop=True),
+        #     y_train.reset_index(drop=True)
+        # )
 
         idx = ros.sample_indices_
         dom_tr_rs1 = dom_train1.iloc[idx].reset_index(drop=True)
@@ -145,6 +139,9 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
     else:
         if gene is not None:
             gene = gene.loc[full_data.index]
+            # if tme_feature is not None:
+            #     tme_scores = full_data[tme_feature]
+            #     gene = pd.concat([gene, tme_scores], axis = 1)
             gene = gene.reset_index(drop = True)
 
         full_data.reset_index(drop=True, inplace=True)
@@ -162,9 +159,6 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
             if gene is not None:
                 gene_all = gene.reset_index(drop=True)
             strat = full_data["source"].astype(str) + "_" + full_data[label_id].astype(str)
-            counts = strat.value_counts()
-            if counts.min() < 2:
-                strat = full_data[label_id]
 
             if k_fold == 1:
                 idx = np.arange(len(X_all))
@@ -181,6 +175,7 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
             else:
                 # Original K-fold logic
                 if strat is not None:
+                    #splitter = StratifiedKFold(n_splits=k_fold, shuffle=True, random_state=123)
                     splitter = RepeatedStratifiedKFold(n_splits=k_fold, n_repeats=3, random_state=123)
                     split_iter = splitter.split(np.zeros(len(X_all)), strat.values)
                 else:
@@ -252,6 +247,7 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
                 # combine all cohorts
                 X_train_out = pd.concat(X_res_list).reset_index(drop=True)
                 perm = np.random.permutation(len(X_train_out))
+                #nonnorm_len = len(tme_feature) + 3
                 if gene is not None:
                     gene_train_out = pd.concat(gene_res_list).reset_index(drop=True)
                     gene_train_out = gene_train_out.iloc[perm].reset_index(drop=True)
@@ -290,14 +286,8 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
             dom_labels1_all = full_data['domain_labels1']
             if gene is not None:
                 gene_all = gene.reset_index(drop=True)
-
             strat = (y_all.astype(str) + "_" + full_data['source'].astype(str)) if y_all.nunique() > 1 else None
-            counts = strat.value_counts()
-            if counts.min() < 2:
-                strat = y_all
-
             if k_fold == 1:
-                # Single "fold": train = all, val = all
                 idx = np.arange(X_all.shape[0])
                 split_iter = [(idx, idx)]
             else:
@@ -315,13 +305,19 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
                         split_iter.append((train_idx, val_idx))
 
                 else:
-                    #splitter = StratifiedKFold(n_splits=k_fold, shuffle=True, random_state=123)
-                    splitter = RepeatedStratifiedKFold(n_splits=k_fold, n_repeats=3, random_state=123)
-                    split_iter = splitter.split(np.zeros(X_all.shape[0]), strat.values)
+                    if task == 'classification':
+                        splitter = RepeatedStratifiedKFold(n_splits=k_fold, n_repeats=3, random_state=123)
+                        split_iter = splitter.split(np.zeros(X_all.shape[0]), strat.values)
+                    else:
+                        splitter = KFold(n_splits=k_fold, shuffle=True, random_state=123)
+                        split_iter = splitter.split(np.zeros(X_all.shape[0]))
+
+            le = LabelEncoder()
 
             for fold_idx, (t_tr_idx, t_val_idx) in enumerate(split_iter, start=1):
                 X_tr = X_all.iloc[t_tr_idx]
                 y_tr = y_all.iloc[t_tr_idx]
+                cancer_labels_tr = cancer_labels.iloc[t_tr_idx]
                 source_labels_tr = source_labels1.iloc[t_tr_idx]
                 X_val = X_all.iloc[t_val_idx]
                 y_val = y_all.iloc[t_val_idx]
@@ -382,6 +378,7 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
                 # combine all cohorts
                 X_train_out = pd.concat(X_res_list).reset_index(drop=True)
                 perm = np.random.permutation(len(X_train_out))
+                #nonnorm_len = len(tme_feature) + 3
                 if gene is not None:
                     gene_train_out = pd.concat(gene_res_list).reset_index(drop=True)
                     gene_train_out = gene_train_out.iloc[perm].reset_index(drop=True)
@@ -411,8 +408,7 @@ def prepare_mut_data(pos = None, clin = None, label_id = 'CB', test_size = 0.3, 
                         'dom_val1': dom_val1_out,
                         #'train_idx_tgt': idx,
                         'train_idx_tgt': t_tr_idx,
-                        'val_idx_tgt': t_val_idx, # idx_balanced
-                        'val_domain': clin.iloc[t_val_idx]['source'][0]
+                        'val_idx_tgt': t_val_idx,
                     }
 
 
@@ -472,8 +468,11 @@ def prepare_test_data(pos = None, clin = None, label_id = 'resp', gene = None):
 
 def encode_domain(df, col):
     vc1 = df[col].value_counts(dropna=True)       
-    order1 = vc1.index.tolist()            
+    # vc2 = df[col[1]].value_counts(dropna=True) 
+    order1 = vc1.index.tolist()    
+    # order2 = vc2.index.tolist()                
     df['domain_labels1'] = pd.Categorical(df[col], categories=order1, ordered=True).codes
+    # df['domain_labels2'] = pd.Categorical(df[col[1]], categories=order2, ordered=True).codes
     return df
 
 
@@ -563,6 +562,10 @@ def get_impres_score(df, sig, name = None):
         if g1_in and g2_in:
             scores += (df.loc[g1] > df.loc[g2]).astype(int)
             pairs_in += 1
+        # elif g1_in and not g2_in:
+        #     continue
+        # elif g2_in and not g1_in:
+        #     continue
         else:
             continue
     scores = scores * 15/pairs_in
@@ -599,6 +602,19 @@ IMPRES = {'Gene1': ['PDCD1','CD27', 'CTLA4', 'CD40', 'CD86', 'CD28', 'CD80', 'CD
 ## ssGSEA
 TGFb = {'TGFb':['SLC20A1', 'XIAP', 'TGFBR1', 'BMPR2','FKBP1A', 'SKIL']}
 
+def map_index_id(df, merge_df, id2symbol = False, transcript = False):
+    if not transcript:
+        if not id2symbol:
+            df1 = df.merge(merge_df, left_index = True, right_on = 'symbol', how = "inner")
+            df1.index = df1['entrez_id']
+            df1 = df1.drop(columns = ['symbol', 'entrez_id'])
+        else:
+            df1 = df.merge(merge_df, left_index = True, right_on = 'entrez_id', how = "inner")
+            df1.index = df1['symbol']
+            df1 = df1.drop(columns = ['symbol', 'entrez_id', 'transcripts'])
+
+    return df1
+
 def get_all_score(df, clin, cancer = "Other", response_col = "resp"):
     common_samples = df.columns.intersection(clin.index)
     df = df[common_samples]
@@ -614,6 +630,7 @@ def get_all_score(df, clin, cancer = "Other", response_col = "resp"):
     tip_coldscore = get_avgmean_score(df, TIP_cold, "TIP Cold")
     cs_polarity_score = get_ratio_score(df, CS_polarity, "CS Polarity")
     impres_score = get_impres_score(df, IMPRES, "IMPRES")
+    #tgfb_score = get_ssgsea_score(df, TGFb)
     score_df = pd.concat([cyt1_score, cyt2_score, ifnr_score, tls_score, tis_score, 
                           tip_hotscore, tip_coldscore, cs_polarity_score, impres_score], axis = 1)#, tgfb_score], axis = 1)
     score_df.columns = ['CYT1', 'CYT2','IFNr','TLS','TIS','TIP Hot','TIP Cold', 'CS Polarity','IMPRES']#,'TGFb']
@@ -752,6 +769,11 @@ def quantile_transformation(gene_train, clin_train, gene_test = None, clin_test 
         for cohort in clin_test['source'].unique():
             idx = clin_test['source'] == cohort
             X_cohort = gene_test.loc[idx]
+            # qt_cohort = QuantileTransformer(
+            #     output_distribution='uniform',
+            #     n_quantiles=min(1000, len(X_cohort)),
+            #     random_state=123
+            # )
             qt_cohort = cohort_qt[cohort]
             qt_cohort.transform(X_cohort)
             percentile = qt_cohort.transform(X_cohort)
@@ -805,6 +827,9 @@ def cohort_align_zscore(X_train, cohort_train, X_test=None, cohort_test=None, co
         for cohort in cohort_test[cohort_col].unique():
             idx = cohort_test[cohort_col] == cohort
             cohort_data = X_test.loc[idx, feature_cols]
+            # cohort_mean = cohort_data.mean()
+            # cohort_std = cohort_data.std()
+            # cohort_std = cohort_std.replace(0, 1)
             cohort_mean, cohort_std = cohort_stats[cohort]
 
             aligned = (

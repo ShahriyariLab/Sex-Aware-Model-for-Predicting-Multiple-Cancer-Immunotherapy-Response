@@ -4,12 +4,13 @@ TRT="PD1"
 n_reps=1
 cancer="allcancer"
 interaction=True
-combat=False
-norm="minmax" #["zscore", "quantile", "cohort_zscore", "cohort_quantile", "cohort_minmax","raw", "minmax"]
+combat="False"
+norm="cohort_minmax" #["zscore", "quantile", "cohort_zscore", "cohort_quantile", "cohort_minmax","raw", "minmax"]
+cv="False"
 
 for i in $(seq 1 "$n_reps"); do
     python -u codes/model_fusion.py --num_epochs 1 --lr 1e-04 --batch_size 16 --epsilon 1e-08 --temperature 0.5 --repeat "$i" --TRT "$TRT" --cancer "$cancer" \
-    --hidden_dim 16 --feature_dim 8 --interaction "$interaction" --correction "$combat" --norm "$norm"
+    --hidden_dim 16 --feature_dim 8 --interaction "$interaction" --correction "$combat" --norm "$norm" --cv "$cv"
 
 done
 

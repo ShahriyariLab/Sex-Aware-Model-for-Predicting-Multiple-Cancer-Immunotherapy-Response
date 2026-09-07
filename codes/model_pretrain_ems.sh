@@ -1,14 +1,14 @@
 
 
 TRT="PD1"
-n_reps=10
+n_reps=1
 cancer="allcancer"
 interaction=True
 pretrain='None' #["None", "TCGA"]
 
 for i in $(seq 1 "$n_reps"); do
-    python -u codes/model_pretrain_ems.py --num_epochs 50 --lr 1e-04 --batch_size 16 --epsilon 1e-08 --temperature 0.5 --repeat "$i" --TRT "$TRT" --cancer "$cancer" \
-    --hidden_dim 16 --feature_dim 8 --da "$da" --interaction "$interaction" --gene_expr --pretrain "$pretrain"
+    python -u codes/model_pretrain_ems.py --num_epochs 3 --lr 1e-04 --batch_size 16 --epsilon 1e-08 --temperature 0.5 --repeat "$i" --TRT "$TRT" --cancer "$cancer" \
+    --hidden_dim 16 --feature_dim 8 --interaction "$interaction" --pretrain "$pretrain"
 
 done
 

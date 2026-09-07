@@ -58,9 +58,10 @@ class SelfAttention(nn.Module):
 
 
 class mut_model(nn.Module):
-    def __init__(self, mut_dim, hidden_dim, feature_dim, interaction = False, monosex = None, monocancer = False, monotrt = False):
+    def __init__(self, mut_dim, hidden_dim, feature_dim, interaction = False, trt_head = False, monosex = None, monocancer = False, monotrt = False):
         super().__init__()
         self.interaction = interaction
+        self.trt_head = trt_head
         self.monosex = monosex
         self.cancer = monocancer
         self.monotrt = monotrt
@@ -71,6 +72,8 @@ class mut_model(nn.Module):
             self.linear1 = nn.Linear(7, hidden_dim)#, feature_dim)
 
         self.norm = nn.LayerNorm(feature_dim)
+        # self.mlp1 = nn.Linear(128, 64)
+        # self.mlp2 = nn.Linear(64, hidden_dim)
 
         self.linear2 = nn.Linear(hidden_dim, feature_dim)
         self.sigmoid = nn.Sigmoid()
@@ -78,8 +81,12 @@ class mut_model(nn.Module):
         self.gelu = nn.GELU()
         self.dropout = nn.Dropout(0.3)
         
-    def forward(self, mutation):
+    def forward(self, mutation, batch):
+        cancer_type = None
         mut_features = mutation[:, :-7]  
+        trt = mutation[:, -2].unsqueeze(1)   # (N, 1)
+        sex = mutation[:, -1].unsqueeze(1)
+        sex_vec = self.sex_emb(mutation[:, -1].long())
         X_bin = (mut_features > 0).float()
         count_feat = X_bin.sum(dim=1, keepdim=True)
         max_feat = mut_features.max(dim=1, keepdim=True).values
@@ -110,26 +117,27 @@ class mut_model(nn.Module):
 
 
 class gene_model(nn.Module):
-    def __init__(self, mut_dim, hidden_dim, feature_dim, interaction = False, monosex = None, monocancer = False, monotrt = False):
+    def __init__(self, mut_dim, hidden_dim, feature_dim, interaction = False, trt_head = False, monosex = None, monocancer = False, monotrt = False):
         super().__init__()
         self.interaction = interaction
+        self.trt_head = trt_head
         self.monosex = monosex
         self.cancer = monocancer
         self.monotrt = monotrt
         self.cohort_emb = nn.Embedding(8, 4)
-        self.sex_emb = nn.Embedding(3,4)
-        self.gate_layer = nn.Linear(4, mut_dim-3)
+        self.sex_emb = nn.Embedding(3, 4)
+        self.gate_layer = nn.Linear(4, mut_dim-6)
         if interaction and (monosex is None):
-            self.linear1 = nn.Linear(2*(mut_dim-3), hidden_dim) #nn.Linear(mut_dim-2, hidden_dim) 
+            self.linear1 = nn.Linear(2*(mut_dim-6), hidden_dim) #nn.Linear(mut_dim-2, hidden_dim) 
         elif (monosex is not None) and interaction:
-            self.linear1 = nn.Linear(2*(mut_dim-3), hidden_dim)#, hidden_dim)
+            self.linear1 = nn.Linear(2*(mut_dim-6), hidden_dim)#, hidden_dim)
         elif (monosex is not None) and not interaction:
-            self.linear1 = nn.Linear(mut_dim-3, hidden_dim)#, hidden_dim)
+            self.linear1 = nn.Linear(mut_dim-6, hidden_dim)#, hidden_dim)
         else:
-            self.linear1 = nn.Linear(mut_dim-3, hidden_dim)#, hidden_dim)
+            self.linear1 = nn.Linear(mut_dim-6, hidden_dim)#, hidden_dim)
         #self.mlp2 = nn.Linear(64, hidden_dim)
 
-        self.attn_proj = nn.Linear(mut_dim-3, hidden_dim)
+        self.attn_proj = nn.Linear(mut_dim-6, hidden_dim)
         self.pos_proj = nn.Linear(mut_dim, hidden_dim)
         self.attention = SelfAttention(hidden_dim, hidden_dim)#(mut_dim-2, mut_dim-2)
         self.norm = nn.LayerNorm(feature_dim)
@@ -141,10 +149,16 @@ class gene_model(nn.Module):
         
     def forward(self, mutation):
 
-        mut_features = mutation[:, :-3]  
+        mut_features = mutation[:, :-6]  
+        cancer = mutation[:, -3].unsqueeze(1)
         
+        trt = mutation[:, -2].unsqueeze(1)   # (N, 1)
         sex = mutation[:, -1].long()
-        cohort_vec = self.cohort_emb(mutation[:, -3].long())
+        cohort = mutation[:, -4].long()
+        met = mutation[:, -5].long()
+        drug = mutation[:, -6].long()
+        sex_vec = self.sex_emb(sex)
+        cohort_vec = self.cohort_emb(cohort) 
         if torch.all(sex == 1):
             gate = torch.sigmoid(self.gate_layer(cohort_vec))
         else:
@@ -169,7 +183,28 @@ class gene_model(nn.Module):
         feature = self.norm(feature)
         x = self.gelu(feature)
 
-        return x
+        return x, met, drug
+
+
+class Classifier(nn.Module):
+    def __init__(self, hidden_dim, feature_dim, dropout = 0.3):
+        super().__init__()
+        
+        self.linear1 = nn.Linear(feature_dim, feature_dim)
+        self.norm = nn.LayerNorm(feature_dim)
+        self.linear2 = nn.Linear(feature_dim, 1)
+        
+        self.attention = SelfAttention(feature_dim, feature_dim)
+
+        self.sigmoid = nn.Sigmoid()
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, z):
+        z = self.norm(self.linear1(z))
+        out = self.linear2(z).squeeze()
+        #out = out.mean(axis = 1).mean(axis = 1)
+        #out = self.sigmoid(out)
+        return out
 
 
 # gradient reversal layer
@@ -195,6 +230,125 @@ class DomainDiscriminator(nn.Module):
     def forward(self, z, alpha=0.01):
         reversed_z = GradientReversalLayer.apply(z, alpha)
         return self.network(reversed_z)
+
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, dim//2, bias = False)
+        self.fc2 = nn.Linear(dim//2, dim//4, bias = False)
+        self.fc3 = nn.Linear(dim//4, dim, bias = False)
+        self.dropout = nn.Dropout(0.3)
+
+    def forward(self, x):
+        identity = x
+        out = F.relu(self.fc1(x))
+        out = self.dropout(out)
+        out = self.fc3(self.fc2(out))
+        return F.relu(out + identity)
+
+
+class ResidualModel(nn.Module):
+    def __init__(self, input_dim, feature_dim, num_cancer_types, modality, rf_main = False):
+        super().__init__()
+
+        self.embedding = nn.Embedding(num_cancer_types, 1)
+        if modality == 'gene+mut':
+            if not rf_main:
+                if num_cancer_types == 1:
+                    self.fc_in = nn.Linear(2*feature_dim, feature_dim)
+                else:
+                    self.fc_in = nn.Linear(2*feature_dim+1, feature_dim)
+            else:
+                self.fc_in = nn.Linear(input_dim, feature_dim)
+        else:
+            if not rf_main:
+                if num_cancer_types == 1:
+                    self.fc_in = nn.Linear(3*feature_dim, feature_dim)
+                else:
+                    self.fc_in = nn.Linear(3*feature_dim+1, feature_dim)
+            else:
+                self.fc_in = nn.Linear(input_dim, feature_dim)
+        # residual blocks
+        self.block1 = ResidualBlock(feature_dim)
+        self.fc_out = nn.Linear(feature_dim, 1)
+        self.modality = modality
+
+    def forward(self, features, cancer_type = None):
+        if cancer_type is not None: 
+            embed = self.embedding(cancer_type)
+            x = torch.cat([features, embed], dim=1)
+        else:
+            x = features
+        x = F.relu(self.fc_in(x))
+        x = self.block1(x)
+        residual = self.fc_out(x)
+        residual = torch.clamp(residual, -1.5, 1.5)
+        return residual
+
+
+
+
+
+def compute_group_attributions(feature_extractor, classifier,
+                               x_batch, gene_location, lambda_loc_mut, model_type):
+
+    if feature_extractor is not None:
+        feature_extractor = feature_extractor.to(device)
+        feature_extractor.eval()
+    
+    classifier = classifier.to(device)
+    classifier.eval()
+
+    # ---- find embeddings to hook (categorical features) ----
+    emb_layers = [m for m in feature_extractor.modules() if isinstance(m, nn.Embedding)]
+    saved = {}; hooks = []
+    def make_hook(name):
+        def _hook(module, inp, out):
+            saved[name] = out
+            out.retain_grad()
+        return _hook
+    for i, m in enumerate(emb_layers):
+        hooks.append(m.register_forward_hook(make_hook(f"emb{i}")))
+
+    # ---- grad-enabled forward (no torch.no_grad()) ----
+    x = x_batch[0].to(device)
+    gene_location = gene_location.to(device)
+    is_cont = x.dtype.is_floating_point
+    if is_cont:
+        x.requires_grad_(True)
+
+    if model_type == 'mutation':
+        features, _ = feature_extractor(x, gene_location, lambda_loc_mut)
+    else:
+        features = feature_extractor(x, gene_location, lambda_loc_mut)
+    logits = classifier(features)
+    logit = logits.sum()
+    g = torch.autograd.grad(logit, x, retain_graph=True, allow_unused=True)[0]
+    feature_extractor.zero_grad(set_to_none=True)
+    classifier.zero_grad(set_to_none=True)
+    logit.backward()
+
+    # ---- collect attributions ----
+    results = {}
+    if is_cont:
+        cont_attr = (g * x).abs().detach()  # Grad×Input
+        cont_attr = cont_attr.reshape(cont_attr.size(0), -1)
+        f0, f1 = (x_batch[0][:, -1] == 0), (x_batch[0][:, -1] == 1)
+        if f0.any(): results['cont_f0'] = cont_attr[f0].abs().mean(dim=0)
+        if f1.any(): results['cont_f1'] = cont_attr[f1].abs().mean(dim=0)
+
+    for name, out in saved.items():
+        if out.grad is None: continue
+        A = out.grad.abs().sum(dim=-1).detach()  # sum over embedding dim -> [B, ...]
+        A = A.reshape(A.size(0), -1)
+        f0, f1 = (x_batch[0][:, -1] == 0), (x_batch[0][:, -1] == 1)
+        if f0.any(): results[(name, 'f0')] = A[f0].mean(dim=0)
+        if f1.any(): results[(name, 'f1')] = A[f1].mean(dim=0)
+
+    for h in hooks: h.remove()
+    return results
 
 
 class LoRALinear(nn.Module):
@@ -251,46 +405,63 @@ def apply_lora_to_linears(module: nn.Module,
 
 
 
+class tme_extractor(nn.Module):
+    def __init__(self, score_dim, feature_dim):
+        super().__init__()
+        self.linear = nn.Linear(score_dim, feature_dim)
+        self.norm = nn.LayerNorm(feature_dim)
+    def forward(self, score):
+        # median = torch.nanmedian(score, dim=0, keepdim=True).values
+        # score = torch.where(torch.isnan(score), median, score)
+        score = torch.nan_to_num(score, nan=0.0)
+        feature = self.norm(self.linear(score))
+        return feature 
+
 # classification head, model for final feature prediction
 class Classifier_fusion(nn.Module):
-    def __init__(self, hidden_dim, feature_dim, dropout = 0.3, modality = 'gene+mut', n_cancer = 1, sex = None):
+    def __init__(self, hidden_dim, feature_dim, dropout = 0.3, modality = 'gene+mut+tme', trt_head = False, n_cancer = 1, sex = None):
         super().__init__()
         
+        # logistic regression
+        #self.log = nn.Linear(hidden_dim, 1)
         self.proj = nn.Linear(feature_dim, hidden_dim)
         self.modality = modality
+        self.trt_head = trt_head
         self.sex = sex
         self.sex_emb = nn.Embedding(3,2)
+        self.drug_emb = nn.Embedding(7, 4)
+        self.met_emb = nn.Embedding(3, 2)
 
         if modality == 'gene+mut':
             if self.sex is None:
-                self.attention = SelfAttention(2*feature_dim+2, 2*feature_dim+4)
-                self.shared_head = nn.Linear(2*feature_dim+2, feature_dim)
-                self.adapter_male = nn.Linear(2*feature_dim+2, feature_dim)
-                self.adapter_female = nn.Linear(2*feature_dim+2, feature_dim)
-                self.linear1 = nn.Linear(2*feature_dim+2, feature_dim) # for concat fusion
-                self.norm1 = nn.LayerNorm(2*feature_dim+2)
+                self.attention = SelfAttention(2*feature_dim+8, 2*feature_dim)
+                self.shared_head = nn.Linear(2*feature_dim+8, feature_dim)
+                self.adapter_male = nn.Linear(2*feature_dim+8, feature_dim)
+                self.adapter_female = nn.Linear(2*feature_dim+8, feature_dim)
+                self.linear1 = nn.Linear(2*feature_dim+8, feature_dim) # for concat fusion
+                self.norm1 = nn.LayerNorm(2*feature_dim)
             else:
-                self.attention = SelfAttention(2*feature_dim, 2*feature_dim)
-                self.shared_head = nn.Linear(2*feature_dim, feature_dim)
-                self.adapter_male = nn.Linear(2*feature_dim, feature_dim)
-                self.adapter_female = nn.Linear(2*feature_dim, feature_dim)
-                self.linear1 = nn.Linear(2*feature_dim, feature_dim) # for concat fusion
+                self.attention = SelfAttention(2*feature_dim+6, 2*feature_dim+6)
+                self.shared_head = nn.Linear(2*feature_dim+6, feature_dim)
+                self.adapter_male = nn.Linear(2*feature_dim+6, feature_dim)
+                self.adapter_female = nn.Linear(2*feature_dim+6, feature_dim)
+                self.linear1 = nn.Linear(2*feature_dim+6, feature_dim) # for concat fusion
                 self.norm1 = nn.LayerNorm(2*feature_dim)
         else:
             if self.sex is None:
-                self.attention = SelfAttention(feature_dim+2, feature_dim)
-                self.shared_head = nn.Linear(feature_dim+2, feature_dim)
-                self.linear1 = nn.Linear(feature_dim+2, feature_dim) # for concat fusion
-                self.norm1 = nn.LayerNorm(feature_dim+2)        
-                self.adapter_male = nn.Linear(feature_dim+2, feature_dim)
-                self.adapter_female = nn.Linear(feature_dim+2, feature_dim)                
-            else:
-                self.attention = SelfAttention(feature_dim, feature_dim)
-                self.shared_head = nn.Linear(feature_dim, feature_dim)
-                self.linear1 = nn.Linear(feature_dim, feature_dim) # for concat fusion
+                self.attention = SelfAttention(feature_dim+8, feature_dim)
+                self.shared_head = nn.Linear(feature_dim+8, feature_dim)
+                self.linear1 = nn.Linear(feature_dim+8, feature_dim) # for concat fusion
                 self.norm1 = nn.LayerNorm(feature_dim)        
-                self.adapter_male = nn.Linear(feature_dim, feature_dim)
-                self.adapter_female = nn.Linear(feature_dim, feature_dim)
+                self.adapter_male = nn.Linear(feature_dim+8, feature_dim)
+                self.adapter_female = nn.Linear(feature_dim+8, feature_dim)                
+            else:
+                self.attention = SelfAttention(feature_dim+6, feature_dim)
+                self.shared_head = nn.Linear(feature_dim+6, feature_dim)
+                self.linear1 = nn.Linear(feature_dim+6, feature_dim) # for concat fusion
+                self.norm1 = nn.LayerNorm(feature_dim)        
+                self.adapter_male = nn.Linear(feature_dim+8, feature_dim)
+                self.adapter_female = nn.Linear(feature_dim+8, feature_dim)
 
         self.norm = nn.LayerNorm(feature_dim)
         self.tanh = nn.Tanh()
@@ -303,30 +474,37 @@ class Classifier_fusion(nn.Module):
         self.sigmoid = nn.Sigmoid()
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, source_features_gene, source_features_mut, sex):
+    def forward(self, source_features_gene, source_features_mut, tme_features, sex, cancer_type, met, drug):
 
         source_features_gene = F.normalize(source_features_gene, dim=1)
         source_features_mut = F.normalize(source_features_mut, dim=1)
         sex_emb = self.sex_emb(sex)
+        met_emb = self.met_emb(met)
+        drug_emb = self.drug_emb(drug)
+        if tme_features is not None:
+            tme_features = F.normalize(tme_features, dim=1)
 
         ### fusion
         if self.sex is None:
             if self.modality == 'gene+mut':
-                z = torch.cat([source_features_gene, source_features_mut, sex_emb], dim = 1) ## concat, linear1(2*hidden_dim+batch_size, hidden_dim)
+                z = torch.cat([source_features_gene, source_features_mut, sex_emb, met_emb, drug_emb], dim = 1) ## concat, linear1(2*hidden_dim+batch_size, hidden_dim)
             elif self.modality == 'gene':
                 #z = torch.cat([source_features_gene, tme_features.unsqueeze(1)], dim = 2)
-                z = torch.cat([source_features_gene, sex_emb], dim = 1)
+                z = torch.cat([source_features_gene, sex_emb, met_emb, drug_emb], dim = 1)
             else:
-                z = torch.cat([source_features_mut, sex_emb], dim = 1)
+                z = torch.cat([source_features_mut, sex_emb, met_emb, drug_emb], dim = 1)
         else:
             if self.modality == 'gene+mut':
-                z = torch.cat([source_features_gene, source_features_mut], dim = 1) ## concat, linear1(2*hidden_dim+batch_size, hidden_dim)
+                z = torch.cat([source_features_gene, source_features_mut, met_emb, drug_emb], dim = 1) ## concat, linear1(2*hidden_dim+batch_size, hidden_dim)
             elif self.modality == 'gene':
-                z = source_features_gene
+                z = torch.cat([source_features_gene, met_emb, drug_emb], dim = 1)
             else:
-                z = source_features_mut
+                z = torch.cat([source_features_mut, met_emb, drug_emb], dim = 1)
 
         z = F.normalize(z, dim=1)
+
+        # z = self.attention(z).squeeze(1)
+        # z = self.dropout(self.norm1(z))
         ### classifier
         if z is None:
             return None
@@ -350,13 +528,32 @@ class Classifier_fusion(nn.Module):
             # final representation
             z = shared_z + 0.5*delta_z
         else:
+            #z = self.norm(self.linear1(z))
             z = self.linear1(z)
-
+        #z = self.dropout(self.tanh(z))
         h = self.gelu(z)
         z = self.dropout(h+z)
         outputs = self.linear2(z)
         out = outputs.squeeze()
         return out
+
+
+def mmd_loss(x, y):
+    n, m = x.size(0), y.size(0)
+    xx = torch.mm(x, x.t())
+    yy = torch.mm(y, y.t())
+    xy = torch.mm(x, y.t())
+    xx = xx - torch.diag(xx.diag())
+    yy = yy - torch.diag(yy.diag())
+
+    return (
+        xx.sum() / (n * (n - 1)) +
+        yy.sum() / (m * (m - 1)) -
+        2 * xy.mean()
+    )
+
+
+
 
 def compute_group_attributions_fusion(feature_extractor_gene, feature_extractor_mut, classifier, x_batch):
 
@@ -375,6 +572,7 @@ def compute_group_attributions_fusion(feature_extractor_gene, feature_extractor_
         m for m in feature_extractor_mut.modules()
         if isinstance(m, nn.Embedding)
     ]
+
     classifier = classifier.to(device)
     classifier.eval()
 
@@ -383,7 +581,7 @@ def compute_group_attributions_fusion(feature_extractor_gene, feature_extractor_
     def make_hook(name):
         def _hook(module, inp, out):
             saved[name] = out.clone()
-            #out.retain_grad()
+
         return _hook
     for i, m in enumerate(emb_layers):
         hooks.append(m.register_forward_hook(make_hook(f"emb{i}")))
@@ -394,31 +592,35 @@ def compute_group_attributions_fusion(feature_extractor_gene, feature_extractor_
 
     is_cont_mut = mut.dtype.is_floating_point
     is_cont_gene = gene.dtype.is_floating_point
+
     if is_cont_mut:
         mut = mut.clone().detach().requires_grad_(True)
     if is_cont_gene:
         gene = gene.clone().detach().requires_grad_(True)
 
-    features_mut, features_gene = None, None
+
+    features_mut, features_gene, features_tme = None, None, None
     if feature_extractor_mut is not None:
-        features_mut, features_sex, _ = feature_extractor_mut(mut)
+        features_mut, features_trt, features_cancer = feature_extractor_mut(mut, mut.shape[0])
     if feature_extractor_gene is not None:
-        features_gene = feature_extractor_gene(gene)
+        features_gene, features_met, features_drug = feature_extractor_gene(gene)
 
     if features_mut is not None:
         features_mut = features_mut.clone()
     if features_gene is not None:
         features_gene = features_gene.clone()
+    if features_trt is not None:
+        features_trt = features_trt.clone()
+    if features_cancer is not None:
+        features_cancer = features_cancer.clone()
 
-    if features_sex is not None:
-        features_sex = features_sex.clone()
-
-    logits = classifier(features_mut, features_gene, features_sex)
+    logits = classifier(features_mut, features_gene, features_tme, features_trt, features_cancer, features_met, features_drug)
     if logits is None:
         for h in hooks:
             h.remove()
         return None
     logit = logits.sum()
+
     inputs_for_grad = [mut, gene]
 
     grads = torch.autograd.grad(
@@ -699,6 +901,9 @@ class MultiModelClassifier(BaseEstimator, ClassifierMixin):
         self.svm_sigmoid.fit(X,y)
         self.svm_linear.fit(X, y)
         self.lr_model.fit(X, y)
+        self.cat_model.fit(X, y)
+        self.ert_model.fit(X,y)
+        self.lgbm_model.fit(X,y)
         return self
 
     def get_models(self):
@@ -710,6 +915,9 @@ class MultiModelClassifier(BaseEstimator, ClassifierMixin):
             'svm_linear': self.svm_linear,
             'svm_sigmoid': self.svm_sigmoid,
             'lr': self.lr_model,
+            'cat': self.cat_model,
+            'ert': self.ert_model,
+            'lgbm': self.lgbm_model
         }
 
     def predict_proba(self, X):
@@ -720,6 +928,9 @@ class MultiModelClassifier(BaseEstimator, ClassifierMixin):
         svm_sigmoid_prob = self.svm_sigmoid.predict_proba(X)[:, 1].reshape(-1)
         svm_linear_prob = self.svm_linear.predict_proba(X)[:, 1].reshape(-1)
         lr_prob = self.lr_model.predict_proba(X)[:, 1].reshape(-1)
+        cat_prob = self.cat_model.predict_proba(X)[:,1].reshape(-1)
+        ert_prob = self.ert_model.predict_proba(X)[:,1].reshape(-1)
+        lgbm_prob = self.lgbm_model.predict_proba(X)[:,1].reshape(-1)
 
         return {
             "xgb_prob": xgb_prob,
@@ -728,4 +939,7 @@ class MultiModelClassifier(BaseEstimator, ClassifierMixin):
             "svm_sigmoid_prob": svm_sigmoid_prob,
             "svm_linear_prob": svm_linear_prob,
             "lr_prob": lr_prob,
+            "cat_prob": cat_prob,
+            "ert_prob": ert_prob,
+            "lgbm_prob": lgbm_prob
         }

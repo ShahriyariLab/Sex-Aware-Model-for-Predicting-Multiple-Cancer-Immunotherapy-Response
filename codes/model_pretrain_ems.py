@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
 from torch_geometric.data import Data
-from positional_encodings.torch_encodings import PositionalEncoding1D
+# from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch.utils.data import WeightedRandomSampler
 import torch.optim as optim
 import pandas as pd
@@ -40,7 +40,7 @@ from itertools import cycle
 from layers import convert_to_sn, remove_all_normalization_layers
 
 import argparse
-from processing import get_all_score, set_seed, zscore_norm, get_2dpos, prepare_mut_data, encode_domain, remove_nonmutate, prepare_test_data, _to_tensor_df, best_threshold_macro_f1, quantile_transformation, cohort_align_zscore
+from processing import get_all_score, set_seed, zscore_norm, get_2dpos, prepare_mut_data, encode_domain, remove_nonmutate, prepare_test_data, _to_tensor_df, best_threshold_macro_f1, quantile_transformation, cohort_align_zscore, cohort_align_minmax
 from selection import feature_selection
 
 from model_utils import SelfAttention, gene_model, mut_model, Classifier_fusion, DomainDiscriminator, compute_group_attributions_fusion, BalancedBatchSampler, EarlyStopping, LoRALinear, apply_lora_to_linears, genetic_optimize_weights, MultiModelClassifier
@@ -54,15 +54,19 @@ def safe_transform(le, values):
     unknown = len(le.classes_)
     return [mapping.get(v, unknown) for v in values]
 
-def pretrain_tcga(gene, pos, clin, num_epochs, batch_size, learning_rate, epsilon, hidden_dim, feature_dim, top_tme_scores,
-                        interaction = True, modality = "gene+mut", cancer = "allcancer", monosex = None, trt = None, lodo = False):
+def pretrain_tcga(gene, pos, clin, num_epochs, batch_size, learning_rate, epsilon, hidden_dim, feature_dim,
+                        trt_head = False, interaction = True, modality = "gene+mut+tme", cancer = "allcancer", task = 'classification', monosex = None, trt = None, lodo = False):
 
     fold_metrics = []
     scores_all = {"logit":[], "modality": []}
     score_ind_all = []
     all_thresholds = []
     fold_cohort = []
-    label = 'resp'
+
+    if task == 'classification':
+        label = 'resp'
+    else:
+        label = 'assigned_y'
 
     monocancer = False
     if (cancer == 'allcancer') or ("+" in cancer):
@@ -73,37 +77,50 @@ def pretrain_tcga(gene, pos, clin, num_epochs, batch_size, learning_rate, epsilo
         monotrt = True
 
 ### no cv, train full model 
-    for pack in prepare_mut_data(pos, clin, label_id=label, k_fold = 1, test_size=0, gene=gene, tme_feature = top_tme_scores):
+    for pack in prepare_mut_data(pos, clin, label_id=label, k_fold = 1, test_size=0, gene=gene, task = task):
 
         X_train_df, y_train, gene_train_df, dom_train1 = pack['X_train'], pack['y_train'], pack['gene_train'], pack['dom_train1']
         X_tr, y_tr, _, gene_train = _to_tensor_df(X_train_df, y_train, dom_train1, device, gene_train_df)
 
         target, target_response, gene_target, target_dom = pack['X_val'], pack['y_val'], pack['gene_val'], pack['dom_val1']
         target, target_response, target_dom, gene_target = _to_tensor_df(target, target_response, target_dom, device, gene_target)
- 
-        feature_extractor_gene = gene_model(gene_train.shape[1], hidden_dim, feature_dim, interaction = interaction, monosex = monosex, 
+
+
+        feature_extractor_gene = gene_model(gene_train.shape[1], hidden_dim, feature_dim, interaction = interaction, trt_head = trt_head, monosex = monosex, 
                                 monocancer = monocancer, monotrt = monotrt)
-        feature_extractor_mut = mut_model(X_tr.shape[1], hidden_dim, feature_dim, interaction = interaction, monosex = monosex, 
+        feature_extractor_mut = mut_model(X_tr.shape[1], hidden_dim, feature_dim, interaction = interaction, trt_head = trt_head, monosex = monosex, 
                                 monocancer = monocancer, monotrt = monotrt)
+
         feature_extractor_gene = feature_extractor_gene.to(device)
         feature_extractor_mut = feature_extractor_mut.to(device)
         n_domain = 1
         if cancer != 'melanoma':
             n_domain = 3 
-        classifier = Classifier_fusion(hidden_dim, feature_dim, modality = modality, dropout = 0.3, n_cancer = n_domain).to(device)
+        classifier = Classifier_fusion(hidden_dim, feature_dim, modality = modality, trt_head = trt_head, dropout = 0.3, n_cancer = n_domain).to(device)
+        dc = DomainDiscriminator(2*feature_dim, feature_dim, n_domain).to(device)
+        tme_nn = None
+
 
         sampler = BalancedBatchSampler(y_tr, batch_size=batch_size)
         source_loader1 = du.DataLoader(du.TensorDataset(X_tr, y_tr, gene_train), batch_sampler=sampler)
 
-        optimizer = optim.Adam(list(feature_extractor_gene.parameters()) + list(feature_extractor_mut.parameters()) +
-                                list(classifier.parameters()), lr=learning_rate, eps = epsilon, weight_decay=1e-03)
+        if 'tme' in modality:
+            optimizer = optim.Adam(list(feature_extractor_gene.parameters()) + list(feature_extractor_mut.parameters()) + list(dc.parameters()) +
+                                    list(tme_nn.parameters()) + list(classifier.parameters()), lr=learning_rate, eps = epsilon, weight_decay=1e-03)
+        else:
+            optimizer = optim.Adam(list(feature_extractor_gene.parameters()) + list(feature_extractor_mut.parameters()) + list(dc.parameters()) +
+                                    list(classifier.parameters()), lr=learning_rate, eps = epsilon, weight_decay=1e-03)
 
         # Loss functions
-        pos_class = (y_tr == 1).sum()
-        neg_class = (y_tr == 0).sum()
-        pos_weight = neg_class / (pos_class + 1e-8)   # avoid division by zero
-        pos_weight = torch.tensor(pos_weight, dtype=torch.float32).to(device)
-        classification_criterion = nn.BCEWithLogitsLoss(pos_weight = pos_weight)#nn.BCELoss()
+        if task == 'classification':
+            pos_class = (y_tr == 1).sum()
+            neg_class = (y_tr == 0).sum()
+            pos_weight = neg_class / (pos_class + 1e-8)   # avoid division by zero
+            pos_weight = torch.tensor(pos_weight, dtype=torch.float32).to(device)
+            classification_criterion = nn.BCEWithLogitsLoss(pos_weight = pos_weight)#nn.BCELoss()
+
+        else:
+            classification_criterion = nn.MSELoss()
 
     # -----------------------------
     # Training Loop
@@ -115,19 +132,25 @@ def pretrain_tcga(gene, pos, clin, num_epochs, batch_size, learning_rate, epsilo
             feature_extractor_gene.train()
             feature_extractor_mut.train()
             classifier.train()
-
-            for _, source_batch1 in enumerate(source_loader1):
+            dc.train()
+            if "tme" in modality:
+                tme_nn.train()
+            for batch_idx, source_batch1 in enumerate(source_loader1):
             
                 source_data1, source_labels1, source_gene = source_batch1
                 source_data1, source_labels1, source_gene = source_data1.to(device), source_labels1.to(device), source_gene.to(device)
+                source_sex = source_data1[:,-1].long()
+                source_features1, sex, cancer_type = feature_extractor_mut(source_data1, batch_size)
+                source_gene1, met, drug = feature_extractor_gene(source_gene)
+                features = torch.cat([source_gene1, source_features1], axis = 1)
 
-                source_features1, sex, _ = feature_extractor_mut(source_data1)
-                source_gene1 = feature_extractor_gene(source_gene)
 
-                class_preds1 = classifier(source_gene1, source_features1, sex)
+                tme_feature = None
+
+                class_preds1 = classifier(source_gene1, source_features1, tme_feature, sex, cancer_type, met, drug)
                 task_loss = classification_criterion(class_preds1, source_labels1.to(torch.float32))
                 total_loss = task_loss
-                
+
                 optimizer.zero_grad()
                 total_loss.backward()
                 optimizer.step()
@@ -137,14 +160,22 @@ def pretrain_tcga(gene, pos, clin, num_epochs, batch_size, learning_rate, epsilo
         
     return  feature_extractor_gene, feature_extractor_mut, classifier, threshold, score_df
 
-
-
 def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num_epochs, batch_size, learning_rate, epsilon, hidden_dim, feature_dim,
-                top_tme_scores, interaction = True, modality = "gene+mut", cancer = "allcancer",
-                monosex = None, trt = None, lodo = False, param_grids = None):
+                trt_head = False, interaction = True, modality = "gene+mut+tme", cancer = "allcancer", task = 'classification', 
+                monosex = None, trt = None, lodo = False, param_grids = None, target_sum = 0.5):
 
+    fold_metrics = []
+    scores_all = {"logit":[], "modality": []}
+    score_ind_all = []
+    all_thresholds = []
+    res_decision = {}
+    cohort_epoch = []
 
-    label = 'resp'
+    if task == 'classification':
+        label = 'resp'
+    else:
+        label = 'assigned_y'
+
     monocancer = False
     if (cancer == 'allcancer') or ("+" in cancer):
         monocancer = False
@@ -155,40 +186,50 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
     if trt == 'PD1':
         monotrt = True
 
-    for pack in prepare_mut_data(pos, clin, label_id=label, k_fold = 1, test_size=0.2, gene=gene, tme_feature = top_tme_scores):
+    for pack in prepare_mut_data(pos, clin, label_id=label, k_fold = 1, test_size=0.2, gene=gene, task = task):
 
         X_train_df, y_train, gene_train_df, dom_train1 = pack['X_train'], pack['y_train'], pack['gene_train'], pack['dom_train1']
         X_tr, y_tr, _, gene_train = _to_tensor_df(X_train_df, y_train, dom_train1, device, gene_train_df)
 
         target, target_response, gene_tgt, target_dom = pack['X_val'], pack['y_val'], pack['gene_val'], pack['dom_val1']
-        target, target_response, target_dom, gene_target = _to_tensor_df(target, target_response, target_dom, device, gene_tgt)
- 
+        target, target_response, target_dom, gene_target = _to_tensor_df(target, target_response, target_dom, device, gene_tgt)     
+
         if feature_extractor_gene is not None:
             mut_model1 = copy.deepcopy(feature_extractor_mut)
             gene_model1 = copy.deepcopy(feature_extractor_gene)
+            tme_model = None
 
             apply_lora_to_linears(mut_model1,  r=16, alpha=16.0, dropout=0.3, freeze_base=True)
             apply_lora_to_linears(gene_model1, r=16, alpha=16.0, dropout=0.3, freeze_base=True)
 
         else:
-            gene_model1 = gene_model(gene_train.shape[1], hidden_dim, feature_dim, interaction = interaction, monosex = monosex, 
+            gene_model1 = gene_model(gene_train.shape[1], hidden_dim, feature_dim, interaction = interaction, trt_head = trt_head, monosex = monosex, 
                                     monocancer = monocancer, monotrt = monotrt).to(device)
-            mut_model1 = mut_model(X_tr.shape[1], hidden_dim, feature_dim, interaction = interaction, monosex = monosex, 
+            mut_model1 = mut_model(X_tr.shape[1], hidden_dim, feature_dim, interaction = interaction, trt_head = trt_head, monosex = monosex, 
                                     monocancer = monocancer, monotrt = monotrt).to(device)
+            tme_model = None
 
         n_domain = 1
         if cancer == 'allcancer':
             n_domain = len(pos['cancer_type'].unique())
 
-        classifier = Classifier_fusion(hidden_dim, feature_dim, modality = modality, dropout = 0.3, n_cancer = n_domain).to(device)
+        classifier = Classifier_fusion(hidden_dim, feature_dim, modality = modality, trt_head = trt_head, dropout = 0.3, n_cancer = n_domain).to(device)
+        apply_lora_to_linears(mut_model1,  r=16, alpha=16.0, dropout=0.3, freeze_base=True)
+        apply_lora_to_linears(gene_model1, r=16, alpha=16.0, dropout=0.3, freeze_base=True)
 
         sampler = BalancedBatchSampler(y_tr, batch_size=batch_size)
         source_loader1 = du.DataLoader(du.TensorDataset(X_tr, y_tr, gene_train), batch_sampler=sampler)
 
-        dc = DomainDiscriminator(2*feature_dim, feature_dim, n_domain).to(device)
-        optimizer = optim.Adam(list(mut_model1.parameters()) + list(gene_model1.parameters())+
-                list(classifier.parameters()), lr=learning_rate, eps = epsilon, weight_decay=1e-03)
 
+        if 'tme' in modality:
+            dc = DomainDiscriminator(3*feature_dim, feature_dim, n_domain).to(device)
+            optimizer = optim.Adam(list(mut_model1.parameters()) + list(gene_model1.parameters()) + list(tme_model.parameters()) +
+                    list(classifier.parameters()), lr=learning_rate, eps = epsilon, weight_decay=1e-03)
+        else:
+            dc = DomainDiscriminator(2*feature_dim, feature_dim, n_domain).to(device)
+            optimizer = optim.Adam(list(mut_model1.parameters()) + list(gene_model1.parameters())+
+                    list(classifier.parameters()), lr=learning_rate, eps = epsilon, weight_decay=1e-03)
+ 
         pos_class = (y_tr == 1).sum()
         neg_class = (y_tr == 0).sum()
         pos_weight = neg_class / (pos_class + 1e-8)   # avoid division by zero
@@ -200,33 +241,36 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
         best_f1 = -float("inf")
         best_res_auc = -float("inf")
 
-        if monosex == 'Female':
-            num_epochs = 100
-        for epoch in range(num_epochs):#(tr_num_epoch):
+        for epoch in range(num_epochs):
 
             gene_model1.train()
             mut_model1.train()
             classifier.train()
             dc.train()
+            if 'tme' in modality:
+                tme_model.train()
             alpha = min(0.1, epoch / num_epochs)
-            for _, source_batch1 in enumerate(source_loader1):
+            for batch_idx, source_batch1 in enumerate(source_loader1):
             
                 source_data1, source_labels1, source_gene = source_batch1
                 source_data1, source_labels1, source_gene = source_data1.to(device), source_labels1.to(device), source_gene.to(device)
 
-                source_gene1 = gene_model1(source_gene)
-                source_features1, sex, cancer_type = mut_model1(source_data1)
+                source_gene1, met, drug = gene_model1(source_gene)
+                source_sex = source_data1[:,-1].long()
+                source_features1, sex, cancer_type = mut_model1(source_data1, batch_size)
                 features = torch.cat([source_gene1, source_features1], axis = 1)
 
-                class_preds1 = classifier(source_gene1, source_features1, sex)
+                tme_feature = None
+
+                class_preds1 = classifier(source_gene1, source_features1, tme_feature, sex, cancer_type, met, drug)
                 task_loss = classification_criterion(class_preds1, source_labels1.to(torch.float32))
                 total_loss = task_loss
                 prob = torch.sigmoid(class_preds1)
 
-                if cancer == 'allcancer':
-                    domain_logits = dc(features, alpha = 0.1)
-                    domain_loss = criterion_domain(domain_logits, cancer_type)
-                    total_loss += alpha * domain_loss
+                # if cancer == 'allcancer':
+                #     domain_logits = dc(features, alpha = 0.1)
+                #     domain_loss = criterion_domain(domain_logits, n_domain)
+                #     total_loss += alpha * domain_loss
 
                 optimizer.zero_grad()
                 total_loss.backward()
@@ -235,14 +279,17 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
             mut_model1.eval()
             gene_model1.eval()
             classifier.eval()
+            if 'tme' in modality:
+                tme_model.eval()
 
             with torch.no_grad():
-                outputs_mut, outputs_sex, outputs_cancer = mut_model1(target)
-                outputs_gene = gene_model1(gene_target)
+                outputs_mut, outputs_sex, outputs_cancer = mut_model1(target, batch_size)
+                outputs_gene, outputs_met, outputs_drug = gene_model1(gene_target)
                 features = torch.cat([outputs_gene, outputs_mut], axis = 1)
+                outputs_tme = None
                 features = torch.nan_to_num(features, nan=1e-06)
 
-                outputs = classifier(outputs_gene, outputs_mut, outputs_sex).view(-1, 1).reshape(-1)
+                outputs = classifier(outputs_gene, outputs_mut, outputs_tme, outputs_sex, outputs_cancer, outputs_met, outputs_drug).view(-1, 1).reshape(-1)
 
                 prob = torch.sigmoid(outputs)
                 features = features#.detach().cpu().numpy()
@@ -265,6 +312,7 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
                 y_pred = preds.cpu().numpy()
                 y_prob = probs.cpu().numpy()
 
+
             accuracy = accuracy_score(y_true, y_pred)
             auc = roc_auc_score(y_true, y_prob)
 
@@ -281,24 +329,28 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
         mut_model1.eval()
         classifier.eval()
 
+        if 'tme' in modality:
+            tme_model.eval()
+
         res_features = []
         res_labels = []
         res_probs = []
         tr_logits = []
-
         with torch.no_grad():
-            for _, source_batch1 in enumerate(source_loader1):
+            for batch_idx, source_batch1 in enumerate(source_loader1):
                 source_data1, source_labels1, source_gene = source_batch1
                 source_data1, source_labels1, source_gene = source_data1.to(device), source_labels1.to(device), source_gene.to(device)
 
-                source_gene1 = gene_model1(source_gene)
+                source_gene1, met, drug = gene_model1(source_gene)
                 source_sex = source_data1[:,-1].long()
-                source_features1, sex, _ = mut_model1(source_data1)
+                source_features1, sex, cancer_type = mut_model1(source_data1, batch_size)
                 features = torch.cat([source_gene1, source_features1], axis = 1)
 
-                class_preds1 = classifier(source_gene1, source_features1, sex)
+                tme_feature = None
+
+                class_preds1 = classifier(source_gene1, source_features1, tme_feature, sex, cancer_type, met, drug)
                 task_loss = classification_criterion(class_preds1, source_labels1.to(torch.float32))
-                total_loss = task_loss# + 0.01 * class_preds1.std()
+                total_loss = task_loss
                 prob = torch.sigmoid(class_preds1)
                 res_features.append(features.detach().cpu().numpy())
                 res_labels.append(source_labels1.detach().cpu().numpy())
@@ -311,7 +363,6 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
             base_logit = np.concatenate([x.reshape(-1) for x in tr_logits])
             ## OOF prediction
             ensemble_model = MultiModelClassifier()
-            target_sum = 0.5
             models = ensemble_model.get_models()
             model_names = list(models.keys())
             n_models = len(model_names)
@@ -339,9 +390,11 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
                 with open(f"data/best_params_{monosex}.json") as f:
                     best_params = json.load(f)
 
+
             for name, params in best_params.items():
                 if name in models:
                     models[name].set_params(**params)
+
 
             oof_preds = np.zeros((len(y), n_models))
             skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=123)
@@ -358,6 +411,7 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
 
             ga_w, ga_auc = genetic_optimize_weights(oof_preds,y, target_sum)
 
+
             ensemble_model = MultiModelClassifier()
             model_map = {
                 'xgb': ensemble_model.xgb_model,
@@ -366,9 +420,9 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
                 'svm_linear': ensemble_model.svm_linear,
                 'svm_sigmoid': ensemble_model.svm_sigmoid,
                 'lr': ensemble_model.lr_model,
-                # 'cat': ensemble_model.cat_model,
-                # 'ert': ensemble_model.ert_model,
-                # 'lgbm': ensemble_model.lgbm_model
+                'cat': ensemble_model.cat_model,
+                'ert': ensemble_model.ert_model,
+                'lgbm': ensemble_model.lgbm_model
             }
 
             for name, params in best_params.items():
@@ -376,12 +430,14 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
                     model_map[name].set_params(**params)
             ensemble_model.fit(X,y)
 
-            outputs_mut, outputs_sex, _ = mut_model1(target)
-            outputs_gene = gene_model1(gene_target)
+            outputs_mut, outputs_sex, outputs_cancer = mut_model1(target, batch_size)
+            outputs_gene, outputs_met, outputs_drug = gene_model1(gene_target)
             features = torch.cat([outputs_gene, outputs_mut], axis = 1)
+            outputs_tme = None
+
             features = torch.nan_to_num(features, nan=1e-06)
 
-            outputs = classifier(outputs_gene, outputs_mut, outputs_sex).view(-1, 1).reshape(-1)
+            outputs = classifier(outputs_gene, outputs_mut, outputs_tme, outputs_sex, outputs_cancer, outputs_met, outputs_drug).view(-1, 1).reshape(-1)
 
             prob = torch.sigmoid(outputs)
             features = features.detach().cpu().numpy()
@@ -397,6 +453,22 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
 
             final_logits = (1-target_sum) * probs + np.dot(aux_probs, ga_w)
             probs = final_logits.squeeze()
+
+            pca = PCA(n_components=2)
+            X_pca = pca.fit_transform(features)
+            plt.figure(figsize=(8,6))
+
+            for c in [0,1]:
+                idx = labels == c
+                plt.scatter(
+                    X_pca[idx,0],
+                    X_pca[idx,1],
+                    alpha=0.7,
+                    label=f"class {c}"
+                )
+            plt.legend()
+            plt.title("PCA of val embeddings by response")
+            plt.show()
             
             probs1 = probs#.cpu().numpy()
             fpr, tpr, thresholds = roc_curve(target_response.cpu().numpy(), probs1)
@@ -429,18 +501,19 @@ def finetune(feature_extractor_gene, feature_extractor_mut, gene, pos, clin, num
         print(f"------ Finetune Ems Validation: Iteration Loss: {task_loss:.4f}, ACC: {accuracy:.4f}, AUC: {auc:.4f}, F1 score: {f1:.4f}, threshold: {optimal_threshold:.4f}")
 
     score_df = None
+
     threshold = optimal_threshold
             
     return  gene_model1, mut_model1, classifier, threshold, score_df, ensemble_model, ga_w
 
+
+
 def predict_fusionmodel(predict_data, feature_extractor_gene, feature_extractor_mut, classifier, ensemble_model,
-                        threshold, modality, ga_w = None, predict_cohort = None):
+                        threshold, modality, task = 'classification', ga_w = None, predict_cohort = None, target_sum = 0.5):
 
     print("---- prediction ----")
     target_mutation, target_response, target_gene1, cohort = predict_data[0], predict_data[1], predict_data[3], predict_data[4]
-
     target_mutation, target_gene1 = target_mutation.to(device), target_gene1.to(device)
-    gene_location, mut_location = gene_location.to(device), mut_location.to(device)
 
     feature_extractor_gene.eval()
     feature_extractor_mut.eval()
@@ -448,16 +521,16 @@ def predict_fusionmodel(predict_data, feature_extractor_gene, feature_extractor_
 
     with torch.no_grad():
 
-        outputs_mut, outputs_sex, _ = feature_extractor_mut(target_mutation)
-        outputs_gene = feature_extractor_gene(target_gene1)
+        outputs_mut, outputs_sex, outputs_cancer = feature_extractor_mut(target_mutation, target_mutation.shape[0])
+        outputs_gene, outputs_met, outputs_drug = feature_extractor_gene(target_gene1)
         features = torch.cat([outputs_gene, outputs_mut], axis = 1)
+        outputs_tme = None
 
-        outputs = classifier(outputs_gene, outputs_mut, outputs_sex).view(-1, 1).reshape(-1)
+        outputs = classifier(outputs_gene, outputs_mut, outputs_tme, outputs_sex, outputs_cancer, outputs_met, outputs_drug).view(-1, 1).reshape(-1)
         probs = expit(outputs.detach().cpu().numpy())
         features = features.detach().cpu().numpy()
         model_probs = ensemble_model.predict_proba(features)
 
-        target_sum = 0.5
         aux_probs = np.column_stack([
                 v for v in model_probs.values()
             ])
@@ -481,6 +554,23 @@ def predict_fusionmodel(predict_data, feature_extractor_gene, feature_extractor_
     p_pos = probs[y==1].mean()
     p_neg = probs[y==0].mean()
     print("test prob for pos and neg", p_pos, p_neg)
+
+    ## visualize validation features
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(features)
+    plt.figure(figsize=(8,6))
+
+    for c in [0,1]:
+        idx = y == c
+        plt.scatter(
+            X_pca[idx,0],
+            X_pca[idx,1],
+            alpha=0.7,
+            label=f"class {c}"
+        )
+    plt.legend()
+    plt.title("PCA of test embeddings by response")
+    plt.show()
 
     accuracy = accuracy_score(y_true, y_pred)
     auc = roc_auc_score(y_true, y_prob)
@@ -596,14 +686,24 @@ def main(args):
         "bladder": 2
     })
 
+    gene_norm_union['drug'] = gene_norm_clin_gene['drug'].map({
+        'Pembrolizumab': 0, 
+        'Nivolumab': 1, 
+        'Ipilimumab + Pembrolizumab': 2,
+        'Ipilimumab + Nivolumab': 3, 
+        'Bevacizumab+Atezolizumab': 4,
+        'Atezolizumab': 5,
+        'unknown': 6
+    })
+
     gene_norm_union['source1'] = gene_norm_clin_gene['source'].map({
         "Braun": 0,
         "IMmotion150": 1,
         "Liu": 2,
         "Riaz": 3,
         "Hugo": 4,
-        "Damrauer": 5,
-        "IMvigor210": 6
+        "IMvigor210": 5,
+        "unknown": 6
     })
 
     gene_pos_grouped['source1'] = gene_norm_clin['source'].map({
@@ -612,8 +712,8 @@ def main(args):
         "Liu": 2,
         "Riaz": 3,
         "Hugo": 4,
-        "Damrauer": 5,
-        "IMvigor210": 6
+        "IMvigor210": 5,
+        "unknown": 6
     })
 
     X_bin = (tcga_mutation > 0).astype(float)
@@ -635,6 +735,8 @@ def main(args):
     tcga_gene['msi'] = tcga_clin['msi_status']
     tcga_gene['source1'] = 7
     tcga_mutation['trt1'] = 0
+    tcga_gene['met1'] = 0 # unknown
+    tcga_gene['drug'] = 6 # unknown
     tcga_gene['trt1'] = 0
     tcga_clin = tcga_clin.rename(columns={"MET": "MET_TUMOR"})
     tcga_clin['domain_labels1'] = 0
@@ -663,8 +765,9 @@ def main(args):
     gene_norm_union['msi'] = gene_norm_clin_gene['msi_status']
     gene_norm_clin_gene = encode_domain(gene_norm_clin_gene, 'trt')
     gene_norm_union['trt1'] = gene_norm_clin_gene['domain_labels1']
-    gene_norm_clin_gene = gene_norm_clin_gene.rename(columns={"MET": "MET_TUMOR"})
     gene_norm_union = gene_norm_union.fillna(0)
+    gene_norm_union['met1'] = gene_norm_clin_gene['MET']
+    gene_norm_clin_gene = gene_norm_clin_gene.rename(columns={"MET": "MET_TUMOR"})
     gene_pos_grouped = gene_pos_grouped.fillna(0)
 
     sample_genepos = gene_norm_union.index.intersection(gene_pos_grouped.index)
@@ -685,7 +788,7 @@ def main(args):
     heldouts = random.sample(heldouts, len(heldouts))
     heldouts = [i for i in heldouts if i in clin_common.index]
 
-    cols_to_move1 = ['cancer_type', 'trt1', 'sex']
+    cols_to_move1 = ['drug', 'met1', 'source1', 'cancer_type', 'trt1', 'sex']
     cols_to_move = ['total_count', 'mut_count', 'mut_max', 'mut_mean', 'cancer_type', 'trt1', 'sex']
 
     pd1_heldout_fusion = clin_common.loc[heldouts].query("trt == 'PD1'").index
@@ -700,15 +803,14 @@ def main(args):
     gene_common_test = gene_norm_union.loc[heldouts]
     gene_common_test_male, gene_common_test_female = gene_common_test.loc[clin_common_test_male.index], gene_common_test.loc[clin_common_test_female.index]
     gene_common_train = gene_norm_union.loc[train_samples_fusion]
-    gene_common_train_female1 = gene_common_train.loc[clin_common_train_female.index]
     gene_common_train_male, gene_common_train_female = gene_common_train.loc[clin_common_train_male.index], gene_common_train.loc[clin_common_train_female.index]
 
 
     ### normalization
-    gene_common_train_norm, gene_common_test_norm = zscore_norm(gene_common_train.drop(columns = cols_to_move1), gene_common_test.drop(columns = cols_to_move1), method = 'minmax')
-    gene_common_train_norm_male, gene_common_test_norm_male = zscore_norm(gene_common_train_male.drop(columns = cols_to_move1), gene_common_test_male.drop(columns = cols_to_move1), method = 'minmax')
-    gene_common_train_norm_female, gene_common_test_norm_female = zscore_norm(gene_common_train_female.drop(columns = cols_to_move1), gene_common_test_female.drop(columns = cols_to_move1), method = 'minmax')
-
+    gene_common_train_norm, gene_common_test_norm = cohort_align_minmax(gene_common_train.drop(columns = cols_to_move1), clin_common_train, gene_common_test.drop(columns = cols_to_move1), clin_common_test)
+    gene_common_train_norm_male, gene_common_test_norm_male = cohort_align_minmax(gene_common_train_male.drop(columns = cols_to_move1), clin_common_train_male, gene_common_test_male.drop(columns = cols_to_move1), clin_common_test_male)
+    gene_common_train_norm_female, gene_common_test_norm_female = cohort_align_minmax(gene_common_train_female.drop(columns = cols_to_move1), clin_common_train_female, gene_common_test_female.drop(columns = cols_to_move1), clin_common_test_female)
+ 
     gene_common_train = pd.concat([gene_common_train_norm, gene_common_train[cols_to_move1]], axis = 1)
     gene_common_train_male = pd.concat([gene_common_train_norm_male, gene_common_train_male[cols_to_move1]], axis = 1)
     gene_common_train_female = pd.concat([gene_common_train_norm_female, gene_common_train_female[cols_to_move1]], axis = 1)
@@ -725,13 +827,14 @@ def main(args):
 
     tcga_clin_common_train = tcga_clin_common
     tcga_clin_common_train_male, tcga_clin_common_train_female = tcga_clin_common_train[tcga_clin_common_train['Gender'] == 'M'], tcga_clin_common_train[tcga_clin_common_train['Gender'] == 'F']
+    tcga_gene = tcga_gene.loc[:,~tcga_gene.columns.duplicated()].fillna(0)
     tcga_gene_common_train = tcga_gene.loc[tcga_clin_common.index]
     tcga_gene_common_train_male, tcga_gene_common_train_female = tcga_gene_common_train.loc[tcga_clin_common_train_male.index], tcga_gene_common_train.loc[tcga_clin_common_train_female.index]
     ## normalization
-    tcga_gene_common_train_norm = zscore_norm(tcga_gene_common_train.drop(columns = cols_to_move1), method = 'minmax')
-    tcga_gene_common_train_norm_male = zscore_norm(tcga_gene_common_train_male.drop(columns = cols_to_move1), method = 'minmax')
-    tcga_gene_common_train_norm_female = zscore_norm(tcga_gene_common_train_female.drop(columns = cols_to_move1), method = 'minmax')    
- 
+    tcga_gene_common_train_norm = cohort_align_minmax(tcga_gene_common_train.drop(columns = cols_to_move1), tcga_clin_common_train, cohort_col = 'cancer')
+    tcga_gene_common_train_norm_male = cohort_align_minmax(tcga_gene_common_train_male.drop(columns = cols_to_move1), tcga_clin_common_train_male, cohort_col = 'cancer')
+    tcga_gene_common_train_norm_female = cohort_align_minmax(tcga_gene_common_train_female.drop(columns = cols_to_move1), tcga_clin_common_train_female, cohort_col = 'cancer')
+
 
     tcga_gene_common_train = pd.concat([tcga_gene_common_train_norm, tcga_gene_common_train[cols_to_move1]], axis = 1)
     tcga_gene_common_train_male = pd.concat([tcga_gene_common_train_norm_male, tcga_gene_common_train_male[cols_to_move1]], axis = 1)
@@ -739,12 +842,6 @@ def main(args):
 
     tcga_mutation_common_train = tcga_mutation.loc[tcga_clin_common.index]
     tcga_mutation_common_train_male, tcga_mutation_common_train_female = tcga_mutation_common_train.loc[tcga_clin_common_train_male.index], tcga_mutation_common_train.loc[tcga_clin_common_train_female.index]
-
-
-    # selected_features_deg = feature_selection(gene_common_train, mutation_common_train, clin_common_train)
-    # selected_features_deg_male = feature_selection(gene_common_train_male, mutation_common_train_male, clin_common_train_male)
-    # selected_features_deg_female = feature_selection(gene_common_train_female1, mutation_common_train_female1, clin_common_train_female1, male_gene = selected_features_deg_male['expr'],
-    #                                 merged_gene = selected_features_deg['expr'])
 
     with open("data/combined_deg_features_filtered.json") as f:
         selected_features_deg = json.load(f)       
@@ -758,9 +855,10 @@ def main(args):
     male_tme = ['PRF1','B2M','HLA-E','GZMK','HLA-DRA','CD86','STAT1','XIAP','CXCL9','CCL21']
     merged_tme = ['IL2RG','CD200','CCL20','NKG7','CXCL10','CD276','CCL21','CXCR4','HLA-DRA','CXCL2','CIITA','TAGAP','CMKLR1','GZMA','LAMP3','IDO1','CD4','CD28','HLA-DRB1','CCL19','STAT1']
 
-    merged_feature = selected_features_deg['expr'] + literature_genes + merged_tme
-    male_feature = selected_features_deg_male['expr'] + literature_genes + male_tme
-    female_feature = selected_features_deg_female['expr'] + literature_genes + female_tme
+
+    merged_feature = selected_features_deg['expr'] + selected_features_deg['mut'] + literature_genes + merged_tme
+    male_feature = selected_features_deg_male['expr'] + selected_features_deg_male['mut'] + literature_genes + male_tme
+    female_feature = list(set(selected_features_deg_female['expr'] + selected_features_deg_female['mut'] + literature_genes + female_tme))
 
     selected_gene_features = list(dict.fromkeys(x for x in merged_feature if x in gene_common_train.columns and x in tcga_gene_common_train.columns))
     selected_mutation_features = [x for x in merged_feature if x in mutation_common_train.columns and x in tcga_mutation_common_train.columns]
@@ -795,20 +893,21 @@ def main(args):
         print("modality: ", modality)
         print("---- training merged model ----")
 
+
         if args.pretrain == 'TCGA':
             merged_model = pretrain_tcga(tcga_gene_common_train, tcga_mutation_common_train, tcga_clin_common_train, args.num_epochs, args.batch_size, args.lr, args.epsilon, 
                             args.hidden_dim, args.feature_dim,
-                            top_tme_scores = feature_names, interaction = args.interaction, modality = modality, cancer = args.cancer,
+                            interaction = args.interaction, modality = modality, cancer = args.cancer,
                             monosex = None, trt = args.TRT, lodo = False)
         else:
             merged_model = [None, None, None]
 
-        merged_model_ft = finetune(merged_model[0], merged_model[1], merged_model[2], gene_common_train, mutation_common_train, clin_common_train, 
+            
+        merged_model_ft = finetune(merged_model[0], merged_model[1], gene_common_train, mutation_common_train, clin_common_train, 
                         args.num_epochs, args.batch_size, args.lr, args.epsilon, 
-                        args.hidden_dim, args.feature_dim,
-                        top_tme_scores = feature_names, interaction = args.interaction, modality = modality, cancer = args.cancer,
-                        monosex = None, trt = args.TRT, lodo = True, param_grids = param_grids)
-
+                        args.hidden_dim, args.feature_dim, 
+                        interaction = args.interaction, modality = modality, cancer = args.cancer,
+                        monosex = None, trt = args.TRT, lodo = False, param_grids = param_grids)
 
         print("---- training male model ----")
 
@@ -819,26 +918,26 @@ def main(args):
                             monosex = 'Male', trt = args.TRT, lodo = False)
         else:
             male_model = [None, None, None]
-        male_model_ft = finetune(male_model[0], male_model[1], male_model[2], gene_common_train_male, mutation_common_train_male, clin_common_train_male, 
+        male_model_ft = finetune(male_model[0], male_model[1], gene_common_train_male, mutation_common_train_male, clin_common_train_male, 
                 args.num_epochs, args.batch_size, args.lr, args.epsilon, 
                 args.hidden_dim, args.feature_dim,
-                top_tme_scores = feature_names, interaction = args.interaction, modality = modality, cancer = args.cancer,
-                monosex = 'Male', trt = args.TRT, lodo = True, param_grids = param_grids)
+                interaction = args.interaction, modality = modality, cancer = args.cancer,
+                monosex = 'Male', trt = args.TRT, lodo = False, param_grids = param_grids)
 
         print("---- training female model ----")
         if args.pretrain == 'TCGA':
             female_model = pretrain_tcga(tcga_gene_common_train_female, tcga_mutation_common_train_female, tcga_clin_common_train_female, args.num_epochs, args.batch_size, args.lr, args.epsilon, 
                             args.hidden_dim, args.feature_dim,
-                            top_tme_scores = feature_names, interaction = args.interaction, modality = modality, cancer = args.cancer,
+                            interaction = args.interaction, modality = modality, cancer = args.cancer,
                             monosex = 'Female', trt = args.TRT, lodo = False)
         else:
             female_model = [None, None, None]
 
-        female_model_ft = finetune(female_model[0], female_model[1], female_model[2], gene_common_train_female, mutation_common_train_female, clin_common_train_female, 
+        female_model_ft = finetune(female_model[0], female_model[1], gene_common_train_female, mutation_common_train_female, clin_common_train_female, 
                 args.num_epochs, args.batch_size, args.lr, args.epsilon, 
                 args.hidden_dim, args.feature_dim,
-                top_tme_scores = feature_names, interaction = args.interaction, modality = modality, cancer = args.cancer,
-                monosex = 'Female', trt = args.TRT, lodo = True, param_grids = param_grids)
+                interaction = args.interaction, modality = modality, cancer = args.cancer,
+                monosex = 'Female', trt = args.TRT, lodo = False, param_grids = param_grids)
 
         all_models[modality] = {
             'merged': merged_model_ft,
@@ -852,12 +951,12 @@ def main(args):
         test_fusion_female = prepare_test_data(mutation_common_test_female, clin_common_test_female, gene = gene_common_test_female)
 
 
-        merged_output, merged_score, merged_pred = predict_fusionmodel(test_fusion, merged_model_ft[0], merged_model_ft[1], merged_model_ft[2], merged_model_ft[4], merged_model_ft[5], 
-                merged_model_ft[3], modality, merged_model_ft[6], predict_cohort = clin_common_test['source'])
-        male_output, male_score, male_pred = predict_fusionmodel(test_fusion_male, male_model_ft[0], male_model_ft[1], male_model_ft[2], male_model_ft[4], male_model_ft[5],
-                male_model_ft[3], modality, male_model_ft[6], predict_cohort = clin_common_test_male['source'])
-        female_output, female_score, female_pred = predict_fusionmodel(test_fusion_female, female_model_ft[0], female_model_ft[1], female_model_ft[2], female_model_ft[4], female_model_ft[5],
-                female_model_ft[3], modality, female_model_ft[6], predict_cohort = clin_common_test_female['source'])
+        merged_output, merged_score, merged_pred = predict_fusionmodel(test_fusion, merged_model_ft[0], merged_model_ft[1], merged_model_ft[2], merged_model_ft[5], merged_model_ft[3], 
+                modality, merged_model_ft[6], predict_cohort = clin_common_test['source'])
+        male_output, male_score, male_pred = predict_fusionmodel(test_fusion_male, male_model_ft[0], male_model_ft[1], male_model_ft[2], male_model_ft[5], male_model_ft[3],
+                modality, male_model_ft[6], predict_cohort = clin_common_test_male['source'])
+        female_output, female_score, female_pred = predict_fusionmodel(test_fusion_female, female_model_ft[0], female_model_ft[1], female_model_ft[2], female_model_ft[5], female_model_ft[3],
+                modality, female_model_ft[6], predict_cohort = clin_common_test_female['source'])
 
         output = merged_output + male_output + female_output
         output = pd.DataFrame(output).T
@@ -882,8 +981,8 @@ def main(args):
     final_output = pd.concat(all_outputs, axis=0, ignore_index=True)
     final_output.to_csv(outdir)
     final_score.to_csv(score_outdir)
-    with open(f"model/tcga_models_pretrain_{args.pretrain}.pkl", "wb") as f:
-        pickle.dump(all_models, f)
+    # with open(f"model/tcga_models_pretrain_{args.pretrain}.pkl", "wb") as f:
+    #     pickle.dump(all_models, f)
 
 
 if __name__ == "__main__":
